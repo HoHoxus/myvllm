@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "myvllm"
+version = "0.2.0"
+authors = [{ name = "Jinqi Jiang" }]
+license = "MIT"
+license-files = ["LICENSE"]
+readme = "README.md"
+description = "Based on nano-vllm (https://github.com/GeeeekExplorer/nano-vllm)"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "torch>=2.4.0",
+    "triton>=3.0.0",
+    "transformers>=4.51.0",
+    "flash-attn",
+    "xxhash",
+]
+
+[project.urls]
+Homepage="https://github.com/GeeeekExplorer/nano-vllm"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["myvllm*"]
