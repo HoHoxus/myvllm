@@ -1,8 +1,8 @@
-from copy import copy
 from enum import Enum, auto
+import math
 from itertools import count
-
-from myvllm.sampling_params import SamplingParams
+from myvllm.sampling_parameters import SamplingParams
+from copy import copy
 
 
 class SequenceStatus(Enum):
@@ -12,29 +12,38 @@ class SequenceStatus(Enum):
 
 
 class Sequence:
-    block_size = 256
     counter = count()
 
-    def __init__(self, token_ids: list[int], sampling_params = SamplingParams()):
+    def __init__(
+        self, token_ids: list[int], block_size: int, sampling_params=SamplingParams()
+    ):
+        self.block_size = block_size  # number of tokens per block
+        # record sequence id
         self.seq_id = next(Sequence.counter)
+        # status
         self.status = SequenceStatus.WAITING
+        # token ids, need copy so that it is a new list, won't be affected by outside changes
         self.token_ids = copy(token_ids)
-        self.last_token = token_ids[-1]
+        # last token
+        self.last_token = self.token_ids[-1] if self.token_ids else None
+        # num_tokens, num_prompt_tokens
         self.num_tokens = len(self.token_ids)
-        self.num_prompt_tokens = len(token_ids)
+        self.num_prompt_tokens = len(self.token_ids)
+        # num_cached_tokens = 0
         self.num_cached_tokens = 0
-        self.num_scheduled_tokens = 0
-        self.is_prefill = True
+        # block_table
         self.block_table = []
+        # sampling_params' related things
         self.temperature = sampling_params.temperature
         self.max_tokens = sampling_params.max_tokens
         self.ignore_eos = sampling_params.ignore_eos
+        self.max_model_length = sampling_params.max_model_length
 
     def __len__(self):
         return self.num_tokens
 
-    def __getitem__(self, key):
-        return self.token_ids[key]
+    def __getitem__(self, idx):
+        return self.token_ids[idx]
 
     @property
     def is_finished(self):
@@ -46,38 +55,64 @@ class Sequence:
 
     @property
     def prompt_token_ids(self):
-        return self.token_ids[:self.num_prompt_tokens]
+        return self.token_ids[: self.num_prompt_tokens]
 
     @property
     def completion_token_ids(self):
-        return self.token_ids[self.num_prompt_tokens:]
+        return self.token_ids[self.num_prompt_tokens :]
+
+    @property
+    def num_cached_blocks(self):
+        return int(math.ceil(self.num_cached_tokens / self.block_size))
 
     @property
     def num_blocks(self):
-        return (self.num_tokens + self.block_size - 1) // self.block_size
+        return int(math.ceil(self.num_tokens / self.block_size))
 
     @property
     def last_block_num_tokens(self):
-        return self.num_tokens - (self.num_blocks - 1) * self.block_size
+        return self.num_tokens - max(self.num_blocks - 1, 0) * self.block_size
 
     def block(self, i):
-        assert 0 <= i < self.num_blocks
-        return self.token_ids[i*self.block_size: (i+1)*self.block_size]
+        assert (
+            0 <= i < self.num_blocks
+        ), f"Block index {i} out of range [0, {self.num_blocks})"
+        if i == self.num_blocks - 1:
+            return self.token_ids[-self.last_block_num_tokens :]
+        else:
+            start_idx = i * self.block_size
+            end_idx = start_idx + self.block_size
+            return self.token_ids[start_idx:end_idx]
 
-    def append_token(self, token_id: int):
+    def append_token(self, token_id):
         self.token_ids.append(token_id)
         self.last_token = token_id
         self.num_tokens += 1
 
     def __getstate__(self):
-        last_state = self.last_token if not self.is_prefill else self.token_ids
-        return (self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.block_table, last_state)
+        return (
+            self.num_tokens,
+            self.num_prompt_tokens,
+            self.num_cached_tokens,
+            self.block_table,
+            self.token_ids if self.num_completion_tokens == 0 else self.last_token,
+        )
 
     def __setstate__(self, state):
-        self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.block_table, last_state = state
-        if isinstance(last_state, list):
-            self.token_ids = last_state
-            self.last_token = self.token_ids[-1]
+        (
+            self.num_tokens,
+            self.num_prompt_tokens,
+            self.num_cached_tokens,
+            self.block_table,
+            last_token_or_ids,
+        ) = state
+        # Check if this is prefill (num_completion_tokens == 0) or decode phase
+        num_completion_tokens = self.num_tokens - self.num_prompt_tokens
+        if num_completion_tokens == 0:
+            # Prefill: last_token_or_ids is the full token_ids list
+            self.token_ids = last_token_or_ids
         else:
-            self.token_ids = []
-            self.last_token = last_state
+            # Decode: last_token_or_ids is just the last token
+            self.token_ids = [last_token_or_ids]
+        # Restore last_token attribute
+        self.last_token = self.token_ids[-1] if self.token_ids else None

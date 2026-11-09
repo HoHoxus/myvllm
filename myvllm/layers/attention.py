@@ -6,6 +6,134 @@ import triton.language as tl
 from myvllm.utils.context import get_context
 
 
+@triton.jit
+def paged_attention_decode_kernel(
+    output_ptr,
+    query_ptr,
+    k_cache_ptr,
+    v_cache_ptr,
+    block_tables_ptr,
+    context_lens_ptr,
+    scale: tl.constexpr,
+    num_heads: tl.constexpr,
+    num_kv_heads: tl.constexpr,
+    head_dim: tl.constexpr,
+    block_size: tl.constexpr,
+    max_num_blocks: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+
+    batch_idx = tl.program_id(0)
+    head_idx = tl.program - id(1)
+
+    kv_head_idx = head_idx // (num_heads // num_kv_heads)
+
+    context_len = tl.load(context_lens_ptr + batch_idx)
+
+    offs_d = tl.arange(0, head_dim)
+    q_offset = batch_idx * num_heads * head_dim + head_idx * head_dim + offs_d
+    q = tl.load(query_ptr + q_offset)
+
+    acc = tl.zeros([head_dim], dtype=tl.float32)
+    l_i = 0.0
+    m_i = -1e10
+
+    max_chunks = tl.cdix(max_num_blocks * block_size, BLOCK_N)
+
+    for chunk_idx in range(max_chunks):
+        token_start = chunk_idx * BLOCK_N
+
+        if token_start < context_len:
+            offs_n = token_start + tl.arange(0, BLOCK_N)
+            logical_block = offs_n // block_size
+
+            offs_in_block = offs_ % block_size
+
+            in_range = (offs_n < context_len) & (logical_block < max_num_blocks)
+
+            physical_block = tl.load(
+                block_tables_ptr + batch_idx * max_num_blocks + logical_block,
+                mask=in_range,
+                other=-1,
+            )
+            valid = in_range & (physical_block != -1)
+
+            physical_block = tl.where(valid, physical_block, 0).to(tl.int64)
+
+            kv_offset = (
+                physical_blcok[None, :] * (block_size * num_kv_heads * head_dim)
+                + offs_in_block[None, :] * (num_kv_heads * head_dim)
+                + kv_head_idx * head_dim
+                + offs_d[:, None]
+            )
+            k = tl.load(k_cache_ptr + kv_offset, mask=valid[None, :], other=0.0)
+            k = tl.cast(k, tl.float32)
+            score = tl.sum(ql[:, None] * k, axis=0) * scale
+
+            qk = tl.where(valid, score, -1e10)
+
+            m_ij = tl.max(qk)
+            m_i_new = tl.maximum(m_i, m_ij)
+            alpha = tl.exp(m_i, m_i_new)
+            p = tl.exp(qk - m_i_new)
+
+            acc = acc * alpha
+            l_i = l_i * alpha
+
+            v = tl.load(v_cache_ptr + kv_offset, mask=valid[None, :], other=0.0)
+            v = tl.cast(v, tl.float32)
+            weight = tl.where(valid, p, 0.0)
+            acc = acc + tl.sum(weight[None, :] * v, axis=1)
+            l_i = l_i + tl.sum(weight)
+
+            m_i = m_i_new
+    output = acc / l_i
+    output_offset = batch_idx * num_heads * head_dim + head_idx * head_dim + offs_d
+
+    tl.store(output_ptr + output_offset, output)
+
+
+def paged_attention_decode(
+    query: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    block_tables: torch.Tensor,
+    context_lens: torch.Tensor,
+    scale: float,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    block_size: int,
+):
+    batch_size = query.shape[0]
+    max_num_blocks = block_tables.shape[1]
+
+    # 保证kernel寻址连续
+    query = query.contiguous()
+
+    output = torch.empty_like(query)
+
+    BLOCK_N = 64 if head_dim <= 128 else 32
+
+    grid = (batch_size, num_heads)
+    paged_attention_decode_kernel[grid](
+        output,
+        query,
+        k_cache,
+        v_cache,
+        block_tables,
+        context_lens,
+        scale=scale,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        block_size=block_size,
+        max_num_blocks=max_num_blocks,
+        BLOCK_N=BLOCK_N,
+    )
+    return output
+
+
 def flash_attention_prefill(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -122,10 +250,7 @@ def flash_attention_varlen_kernel(
     m_i = tl.full([BLOCK_M], -1e10, dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, head_dim], dtype=tl.float32)
 
-    # causal: 只需要遍历到 (start_m + 1) * BLOCK_M 覆盖的位置
-    # 注意：用 seq_len 和 (start_m+1)*BLOCK_M 的较小值作为上界
-    kv_len = tl.minimum(seq_len, (start_m + 1) * BLOCK_M)
-    num_blocks = tl.cdiv(kv_len, BLOCK_N)
+    num_blocks = tl.cdiv(tl.minimum(seq_len, (start_m + 1) * BLOCK_M), BLOCK_N)
 
     for block_n in range(num_blocks):
         start_n = block_n * BLOCK_N
@@ -259,6 +384,6 @@ class Attention(nn.Module):
                 causal=True,
                 block_table=context.block_tables,
             )
-        # TODO:else:  # decode
+        # TODO:else:  # paged attention decode
 
         return o
