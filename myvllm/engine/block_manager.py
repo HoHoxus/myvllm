@@ -6,10 +6,12 @@ from myvllm.engine.sequence import Sequence
 
 
 class Block:
-
+    # kv 块
     def __init__(self, block_id):
         self.block_id = block_id
+        # 被几个序列引用
         self.ref_count = 0
+        # 用于block的前缀哈希
         self.hash = -1
         self.token_ids = []
 
@@ -24,11 +26,14 @@ class Block:
 
 
 class BlockManager:
-
+    # 负责 kv 块的存储 分配 回收
     def __init__(self, num_blocks: int, block_size: int):
         self.block_size = block_size
+        # 所有的blocks
         self.blocks: list[Block] = [Block(i) for i in range(num_blocks)]
+        # 避免前缀一致的重复存放
         self.hash_to_block_id: dict[int, int] = dict()
+        # 空闲blocks
         self.free_block_ids: deque[int] = deque(range(num_blocks))
         self.used_block_ids: set[int] = set()
 
@@ -41,6 +46,7 @@ class BlockManager:
         return h.intdigest()
 
     def _allocate_block(self) -> int:
+        # 建页表
         block_id = self.free_block_ids.popleft()
         block = self.blocks[block_id]
         assert block.ref_count == 0
@@ -51,11 +57,13 @@ class BlockManager:
         return block_id
 
     def _deallocate_block(self, block_id: int):
+        # 回收页表
         assert self.blocks[block_id].ref_count == 0
         self.used_block_ids.remove(block_id)
         self.free_block_ids.append(block_id)
 
     def can_allocate(self, seq: Sequence) -> int:
+        # 补充哈希
         h = -1
         num_cached_blocks = 0
         num_new_blocks = seq.num_blocks
@@ -110,7 +118,8 @@ class BlockManager:
     def hash_blocks(self, seq: Sequence):
         start = seq.num_cached_tokens // self.block_size
         end = (seq.num_cached_tokens + seq.num_scheduled_tokens) // self.block_size
-        if start == end: return
+        if start == end:
+            return
         h = self.blocks[seq.block_table[start - 1]].hash if start > 0 else -1
         for i in range(start, end):
             block = self.blocks[seq.block_table[i]]

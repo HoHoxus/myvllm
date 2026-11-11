@@ -10,5 +10,5 @@ keeping the codebase small and readable.
 ## Roadmap
 
 - ✅ Flash Attention kernel (Triton)
-- ⬜ Paged Attention kernel
-- ⬜ Extract embeddings during inference
+- ✅ Paged Attention kernel
+- ⬜ Prefill-Decode Disaggregation
