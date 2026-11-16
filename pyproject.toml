@@ -12,6 +12,7 @@ readme = "README.md"
 description = "Based on nano-vllm (https://github.com/GeeeekExplorer/nano-vllm)"
 requires-python = ">=3.10,<3.13"
 dependencies = [
+    "tqdm",
     "torch>=2.4.0",
     "triton>=3.0.0",
     "transformers>=4.51.0",

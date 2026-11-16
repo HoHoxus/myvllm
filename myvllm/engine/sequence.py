@@ -1,7 +1,7 @@
 from enum import Enum, auto
 import math
 from itertools import count
-from myvllm.sampling_parameters import SamplingParams
+from myvllm.sampling_params import SamplingParams
 from copy import copy
 
 
@@ -13,11 +13,13 @@ class SequenceStatus(Enum):
 
 class Sequence:
     counter = count()
+    block_size = 256
 
     def __init__(
-        self, token_ids: list[int], block_size: int, sampling_params=SamplingParams()
+        self, token_ids: list[int], sampling_params=None
     ):
-        self.block_size = block_size  # number of tokens per block
+        if sampling_params is None:
+            sampling_params = SamplingParams()
         # record sequence id
         self.seq_id = next(Sequence.counter)
         # status
@@ -37,7 +39,6 @@ class Sequence:
         self.temperature = sampling_params.temperature
         self.max_tokens = sampling_params.max_tokens
         self.ignore_eos = sampling_params.ignore_eos
-        self.max_model_length = sampling_params.max_model_length
 
     def __len__(self):
         return self.num_tokens
